@@ -19,6 +19,7 @@ function getNodeModules() {
     os: nodeRequire('os'),
     spawn: nodeRequire('child_process').spawn,
     https: nodeRequire('https'),
+    http: nodeRequire('http'),
   };
 }
 
@@ -419,4 +420,4 @@ class DesktopTranscriber {
   }
 }
 
-module.exports = { DesktopTranscriber };
+module.exports = { DesktopTranscriber, downloadFile, extractZip, findExecutable, getNodeModules };

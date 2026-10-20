@@ -24,7 +24,7 @@ describe('WhisperTranscriptionPlugin', () => {
     const addRibbonIcon = jest.spyOn(plugin, 'addRibbonIcon');
     const addSettingTab = jest.spyOn(plugin, 'addSettingTab');
     await plugin.onload();
-    expect(addCommand).toHaveBeenCalledTimes(4);
+    expect(addCommand).toHaveBeenCalledTimes(5);
     expect(addRibbonIcon).toHaveBeenCalledTimes(2);
     expect(addSettingTab).toHaveBeenCalledTimes(1);
   });
@@ -1153,6 +1153,71 @@ describe('Audio file transcription', () => {
     const spy = noticeSpy();
     await plugin.transcribeFile('Recording.m4a');
     expect(noticed(spy, 'File not found: Recording.m4a')).toBe(true);
+    spy.mockRestore();
+  });
+
+  test('addTranscribeButtons adds no Clean up button on mobile', async () => {
+    const { plugin } = createPlugin();
+    const root = document.createElement('div');
+    const embed = document.createElement('div');
+    embed.className = 'internal-embed';
+    embed.setAttribute('src', 'Recording.m4a');
+    root.appendChild(embed);
+    plugin.addTranscribeButtons(root);
+    expect(embed.querySelectorAll('.transcribe-audio-btn').length).toBe(1);
+    expect(embed.querySelectorAll('.cleanup-audio-btn').length).toBe(0);
+  });
+
+  test('cleanup settings default to manual with the small model', async () => {
+    const { plugin } = createPlugin();
+    await plugin.loadSettings();
+    expect(plugin.settings.cleanupAuto).toBe(false);
+    expect(plugin.settings.cleanupModel).toBe('qwen2.5-0.5b');
+    expect(plugin.settings.cleanupPrompt).toContain('{text}');
+  });
+
+  test('cleanTranscript returns the raw text on mobile', async () => {
+    const { plugin } = createPlugin();
+    await plugin.onload();
+    const result = await plugin.cleanTranscript('um so hello');
+    expect(result).toBe('um so hello');
+  });
+
+  test('auto cleanup inserts the raw transcript on mobile', async () => {
+    const { plugin, editor } = setupFileTranscription('![[Recording.m4a]]');
+    plugin.settings.cleanupAuto = true;
+    await plugin.transcribeFile('Recording.m4a');
+    expect(editor.getValue()).toBe('![[Recording.m4a]]\n\n## Transcription\n\nthis is a test transcription');
+  });
+
+  test('formatTranscript keeps the original in a collapsed callout', async () => {
+    const { plugin } = createPlugin();
+    const formatted = plugin.formatTranscript('um hello there\nsecond line', 'Hello there. Second line.');
+    expect(formatted).toBe(
+      'Hello there. Second line.\n\n> [!note]- Original transcript\n> um hello there\n> second line',
+    );
+  });
+
+  test('formatTranscript returns the raw text when nothing changed', async () => {
+    const { plugin } = createPlugin();
+    expect(plugin.formatTranscript('same text', 'same text')).toBe('same text');
+    expect(plugin.formatTranscript('same text', '')).toBe('same text');
+  });
+
+  test('extractOriginalTranscript reads the callout back out', async () => {
+    const { plugin } = createPlugin();
+    const content = 'Hello there.\n\n> [!note]- Original transcript\n> um hello there\n> second line';
+    expect(plugin.extractOriginalTranscript(content)).toBe('um hello there\nsecond line');
+    expect(plugin.extractOriginalTranscript('plain text')).toBe('plain text');
+  });
+
+  test('cleanUpFile explains cleanup is desktop only on mobile', async () => {
+    const note = '![[Recording.m4a]]\n\n## Transcription\n\num so hello there';
+    const { plugin, editor } = setupFileTranscription(note);
+    const spy = noticeSpy();
+    await plugin.cleanUpFile('Recording.m4a');
+    expect(editor.getValue()).toBe(note);
+    expect(noticed(spy, 'Cleanup is only available on desktop')).toBe(true);
     spy.mockRestore();
   });
 });

@@ -169,3 +169,45 @@ So basically the idea is that I can speak instead of typing...
   own embed.
 - Desktop uses the downloaded whisper.cpp in the plugin folder; mobile uses
   the cached transformers.js model. No new runtime dependencies.
+
+## Feature: transcript cleanup (local tiny LLM)
+
+Status: implemented. Goal: strip filler words (um, ah, you know), fix
+punctuation/capitalisation, and split into paragraphs with **minimal changes**
+to the wording. Desktop only; mobile keeps the raw transcript.
+
+### Design decisions (validated in a spike)
+
+- Runtime: llama.cpp prebuilt CPU binaries (`llama-server`) from the official
+  `ggml-org/llama.cpp` releases, downloaded into `<pluginDir>/bin` exactly like
+  whisper.cpp. Assets are attached to per-commit `b`-tag releases, so the
+  downloader lists releases and picks the newest with a matching asset
+  (`llama-b*-bin-macos-arm64.tar.gz`, `-macos-x64`, `-ubuntu-x64`,
+  `-ubuntu-arm64`, `-win-cpu-x64.zip`).
+- Model: Qwen2.5-Instruct GGUF (bartowski quants) into `<pluginDir>/models`.
+  Default `qwen2.5-0.5b` (Q4_K_M, 379 MB) — smallest model that reliably does
+  the job; `qwen2.5-1.5b` (940 MB) selectable for better quality.
+- Interface: `llama-server` on 127.0.0.1 (random port), model kept loaded
+  between cleanups, `POST /tokenize` to check the context limit,
+  `POST /v1/chat/completions` for the actual cleanup (temperature 0.2).
+  Chosen over `llama-cli` because the CLI echoes prompts on stdout and
+  reloads the model every call. No new npm dependencies.
+- Prompting: the instruction and transcript must both be in the **user**
+  message; 0.5B models echo the input if the instruction is only in the system
+  prompt. Limit: `CONTEXT_SIZE 8192` - `MAX_OUTPUT_TOKENS 2048`; transcripts
+  over the limit are left unchanged with a warning (no chunking).
+
+### Behaviour
+
+- Setting **Clean up transcripts** (default off): when on, file transcriptions
+  are cleaned automatically. Live recordings are never auto-cleaned.
+- Manual triggers: inline **Clean up** button on audio embeds (desktop only)
+  and command **Clean up transcript in this note** (picker of audio embeds).
+- When cleanup changes the text, the raw transcript is preserved below the
+  cleaned text in a collapsed `> [!note]- Original transcript` callout;
+  re-cleaning reads the original back out of the callout so text is never
+  cleaned twice.
+- Cleanup failure or unchanged output leaves the note unchanged (raw text is
+  used) and shows a notice. One cleanup at a time.
+- Settings: cleanup on/off, model choice, editable prompt (`{text}` replaced
+  with the transcript; appended if absent). No temperature or other knobs.

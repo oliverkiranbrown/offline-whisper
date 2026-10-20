@@ -8,7 +8,10 @@ function isAudioEmbed(linkpath) {
   return AUDIO_EXTENSIONS.includes(ext);
 }
 
-let pipeline, env, DesktopTranscriber;
+let pipeline, env, DesktopTranscriber, DesktopCleaner;
+
+const DEFAULT_CLEANUP_PROMPT =
+  'Clean up the following voice transcription. Remove filler words and hesitation sounds (um, uh, ah, er, hmm), false starts, and repeated words. Fix punctuation and capitalisation. Split the text into short paragraphs where the topic changes. Make minimal changes: keep all content and meaning, do not summarise, reorder, or add anything. Output only the cleaned text.\n\nTranscription:\n{text}';
 
 // Allow testing to override platform detection via globalThis.__desktopOverride
 // Set to true in tests to force desktop code path
@@ -24,6 +27,7 @@ if (isMobilePlatform) {
 } else {
   const desktopModule = require('./desktop-transcriber.js');
   DesktopTranscriber = desktopModule.DesktopTranscriber;
+  DesktopCleaner = require('./desktop-cleaner.js').DesktopCleaner;
 }
 
 function log(message, data) {
@@ -67,11 +71,16 @@ class WhisperTranscriptionPlugin extends Plugin {
     chunkDurationMs: 10000,
     regexFilter: this.defaultFilter,
     headingLevel: 2,
+    cleanupAuto: false,
+    cleanupModel: 'qwen2.5-0.5b',
+    cleanupPrompt: DEFAULT_CLEANUP_PROMPT,
   };
   transcriber = null;
   desktopTranscriber = null;
+  desktopCleaner = null;
   isRecording = false;
   isFileTranscribing = false;
+  isCleaningUp = false;
   isModelLoading = false;
   mediaStream = null;
   currentRecorder = null;
@@ -115,9 +124,14 @@ class WhisperTranscriptionPlugin extends Plugin {
     this.addCommand({
       id: 'transcribe-audio-in-note',
       name: 'Transcribe audio in this note',
-      callback: () => this.pickAudioFile(),
+      callback: () => this.pickAudioFile((link) => this.transcribeFile(link)),
     });
-    this.addRibbonIcon('file-audio', 'Transcribe audio in this note', () => this.pickAudioFile());
+    this.addCommand({
+      id: 'clean-up-transcript-in-note',
+      name: 'Clean up transcript in this note',
+      callback: () => this.pickAudioFile((link) => this.cleanUpFile(link)),
+    });
+    this.addRibbonIcon('file-audio', 'Transcribe audio in this note', () => this.pickAudioFile((link) => this.transcribeFile(link)));
 
     // Inline Transcribe buttons: post processor for Reading view,
     // MutationObserver for Live Preview (post processor does not run there).
@@ -434,11 +448,22 @@ class WhisperTranscriptionPlugin extends Plugin {
         this.transcribeFile(src);
       });
       embed.appendChild(btn);
-      log('Added transcribe button for: ' + src);
+      if (!isMobilePlatform) {
+        const cleanBtn = document.createElement('button');
+        cleanBtn.textContent = 'Clean up';
+        cleanBtn.className = 'cleanup-audio-btn';
+        cleanBtn.addEventListener('click', (evt) => {
+          evt.preventDefault();
+          evt.stopPropagation();
+          this.cleanUpFile(src);
+        });
+        embed.appendChild(cleanBtn);
+      }
+      log('Added transcribe buttons for: ' + src);
     });
   }
 
-  pickAudioFile() {
+  pickAudioFile(action = (link) => this.transcribeFile(link)) {
     const editor = this.app.workspace.activeEditor ? this.app.workspace.activeEditor.editor : null;
     if (!editor) {
       new Notice('No active note');
@@ -454,7 +479,7 @@ class WhisperTranscriptionPlugin extends Plugin {
       new Notice('No audio embeds in this note');
       return;
     }
-    new AudioSuggestModal(this.app, links, (link) => this.transcribeFile(link)).open();
+    new AudioSuggestModal(this.app, links, action).open();
   }
 
   async decodeAudioFile(file) {
@@ -543,7 +568,15 @@ class WhisperTranscriptionPlugin extends Plugin {
         throw new Error('Placeholder removed from note');
       }
       if (text && !this.getFilterRegex().test(text)) {
-        editor.setLine(placeholderLine, text);
+        let finalText = text;
+        if (this.settings.cleanupAuto) {
+          finalText = await this.cleanTranscript(text);
+        }
+        editor.replaceRange(
+          this.formatTranscript(text, finalText),
+          { line: placeholderLine, ch: 0 },
+          { line: placeholderLine, ch: editor.getLine(placeholderLine).length }
+        );
         new Notice('Transcribed');
       } else {
         this.removePlaceholderSection(editor, placeholderLine, oldText);
@@ -588,6 +621,117 @@ class WhisperTranscriptionPlugin extends Plugin {
       editor.setLine(placeholderLine, '');
     }
   }
+
+  async cleanTranscript(text) {
+    if (isMobilePlatform) {
+      return text;
+    }
+    try {
+      if (!this.desktopCleaner) {
+        this.desktopCleaner = new DesktopCleaner(this);
+      }
+      await this.desktopCleaner.initialize(this.settings.cleanupModel, (progress) => {
+        if (progress.message) {
+          this.showStatus(progress.message, true);
+        }
+      });
+      this.showStatus('Cleaning up transcript', true);
+      const cleaned = await this.desktopCleaner.clean(text, this.settings.cleanupPrompt);
+      log('Cleanup result: ' + (cleaned ? cleaned.slice(0, 200) : '(empty)'));
+      return cleaned || text;
+    } catch (error) {
+      log('Cleanup FAILED', error);
+      new Notice('Cleanup failed: ' + error.message);
+      return text;
+    }
+  }
+
+  formatTranscript(raw, cleaned) {
+    if (!cleaned || cleaned === raw) {
+      return raw;
+    }
+    const quoted = raw
+      .split('\n')
+      .map((line) => '> ' + line)
+      .join('\n');
+    return cleaned + '\n\n> [!note]- Original transcript\n' + quoted;
+  }
+
+  extractOriginalTranscript(content) {
+    const lines = content.split('\n');
+    const index = lines.findIndex((line) => /^>\s*\[!note\]-?\s*Original transcript/i.test(line));
+    if (index === -1) {
+      return content.trim();
+    }
+    return lines
+      .slice(index + 1)
+      .filter((line) => line.startsWith('>'))
+      .map((line) => line.replace(/^>\s?/, ''))
+      .join('\n')
+      .trim();
+  }
+
+  async cleanUpFile(linkpath) {
+    if (isMobilePlatform) {
+      new Notice('Cleanup is only available on desktop');
+      return;
+    }
+    if (this.isCleaningUp) {
+      new Notice('A cleanup is already running');
+      return;
+    }
+    const editor = this.app.workspace.activeEditor ? this.app.workspace.activeEditor.editor : null;
+    if (!editor) {
+      new Notice('No active note');
+      return;
+    }
+    let embedLine = -1;
+    for (let i = 0; i < editor.lineCount(); i++) {
+      if (editor.getLine(i).includes('![[' + linkpath)) {
+        embedLine = i;
+        break;
+      }
+    }
+    if (embedLine === -1) {
+      new Notice('Embed not found in the active note');
+      return;
+    }
+    let headingLine = embedLine + 1;
+    while (headingLine < editor.lineCount() && !editor.getLine(headingLine).trim()) {
+      headingLine++;
+    }
+    if (headingLine >= editor.lineCount() || !/^#+ Transcription\s*$/.test(editor.getLine(headingLine))) {
+      new Notice('No transcription found for: ' + linkpath);
+      return;
+    }
+    let sectionEnd = headingLine;
+    while (sectionEnd + 1 < editor.lineCount() && !/^#/.test(editor.getLine(sectionEnd + 1))) {
+      sectionEnd++;
+    }
+    const contentLines = [];
+    for (let i = headingLine + 1; i <= sectionEnd; i++) {
+      contentLines.push(editor.getLine(i));
+    }
+    const content = contentLines.join('\n').trim();
+    if (!content) {
+      new Notice('No transcription found for: ' + linkpath);
+      return;
+    }
+    const raw = this.extractOriginalTranscript(content);
+    this.isCleaningUp = true;
+    try {
+      const cleaned = await this.cleanTranscript(raw);
+      if (!cleaned || cleaned === raw) {
+        new Notice('Transcript unchanged');
+        return;
+      }
+      editor.replaceRange('\n' + this.formatTranscript(raw, cleaned), { line: headingLine + 1, ch: 0 }, { line: sectionEnd, ch: editor.getLine(sectionEnd).length });
+      new Notice('Transcript cleaned up');
+    } finally {
+      this.isCleaningUp = false;
+    }
+  }
+
 
   async transcribeAudio(audioBlob, chunkNum) {
     if (!this.transcriber) {
@@ -708,6 +852,9 @@ class WhisperTranscriptionPlugin extends Plugin {
     if (this.embedObserver) {
       this.embedObserver.disconnect();
     }
+    if (this.desktopCleaner) {
+      this.desktopCleaner.shutdown();
+    }
   }
 }
 
@@ -817,6 +964,39 @@ class WhisperSettingTab extends PluginSettingTab {
           })
       );
     new Setting(containerEl)
+      .setName('Clean up transcripts')
+      .setDesc('Run transcripts through the local cleanup model automatically (desktop only). When off, use the Clean up button or command.')
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.cleanupAuto).onChange(async (value) => {
+          this.plugin.settings.cleanupAuto = value;
+          await this.plugin.saveSettings();
+        })
+      );
+    new Setting(containerEl)
+      .setName('Cleanup model')
+      .setDesc('Local model used to clean up transcripts. The smaller model is faster; the larger model makes fewer mistakes.')
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('qwen2.5-0.5b', 'Qwen2.5 0.5B (fast, 379 MB)')
+          .addOption('qwen2.5-1.5b', 'Qwen2.5 1.5B (better, 940 MB)')
+          .setValue(this.plugin.settings.cleanupModel)
+          .onChange(async (value) => {
+            this.plugin.settings.cleanupModel = value;
+            await this.plugin.saveSettings();
+          })
+      );
+    new Setting(containerEl)
+      .setName('Cleanup prompt')
+      .setDesc('Prompt sent with the transcript. {text} is replaced with the transcript text.')
+      .addTextArea((textArea) =>
+        textArea
+          .setValue(this.plugin.settings.cleanupPrompt)
+          .onChange(async (value) => {
+            this.plugin.settings.cleanupPrompt = value;
+            await this.plugin.saveSettings();
+          })
+      );
+    new Setting(containerEl)
       .setName('Chunk duration (seconds)')
       .setDesc('How often transcription runs. 10-15s recommended.')
       .addSlider((slider) =>
@@ -873,6 +1053,10 @@ class WhisperSettingTab extends PluginSettingTab {
               if (!isMobilePlatform) {
                 if (!this.plugin.desktopTranscriber) {
                   this.plugin.desktopTranscriber = new DesktopTranscriber(this.plugin);
+                }
+                if (this.plugin.desktopCleaner) {
+                  // Stop llama-server so its binary can be deleted (required on Windows).
+                  this.plugin.desktopCleaner.shutdown();
                 }
                 this.plugin.desktopTranscriber.clearCache();
                 new Notice('Cache cleared');

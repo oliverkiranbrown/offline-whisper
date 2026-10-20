@@ -14,6 +14,14 @@ jest.mock('../src/desktop-transcriber.js', () => ({
   DesktopTranscriber: jest.fn().mockImplementation(() => ({ isModelCached: jest.fn(), clearCache: jest.fn() })),
 }));
 
+jest.mock('../src/desktop-cleaner.js', () => ({
+  DesktopCleaner: jest.fn().mockImplementation(() => ({
+    initialize: jest.fn().mockResolvedValue(),
+    clean: jest.fn().mockResolvedValue('Cleaned text.'),
+    shutdown: jest.fn(),
+  })),
+}));
+
 const WhisperTranscriptionPlugin = require('../src/main.js');
 const { WhisperSettingTab } = WhisperTranscriptionPlugin;
 
@@ -69,7 +77,7 @@ describe('WhisperTranscriptionPlugin Desktop Path', () => {
 
     await plugin.onload();
 
-    expect(plugin.addCommand).toHaveBeenCalledTimes(4);
+    expect(plugin.addCommand).toHaveBeenCalledTimes(5);
     expect(plugin.addRibbonIcon).toHaveBeenCalledTimes(2);
     expect(plugin.addSettingTab).toHaveBeenCalledTimes(1);
   });
@@ -152,5 +160,167 @@ describe('Coverage verification for lines 582-621', () => {
     }
 
     expect(dtc.clearCache).toHaveBeenCalled();
+  });
+});
+
+describe('Transcript cleanup (desktop)', () => {
+  const cleanerModule = require('../src/desktop-cleaner.js');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    cleanerModule.DesktopCleaner.mockImplementation(() => ({
+      initialize: jest.fn().mockResolvedValue(),
+      clean: jest.fn().mockResolvedValue('Cleaned text.'),
+      shutdown: jest.fn(),
+    }));
+  });
+
+  function makeEditor(text) {
+    const lines = text.split('\n');
+    const offset = (pos) => {
+      let o = 0;
+      for (let i = 0; i < pos.line; i++) o += lines[i].length + 1;
+      return o + pos.ch;
+    };
+    const all = () => lines.join('\n');
+    return {
+      getValue: () => all(),
+      lineCount: () => lines.length,
+      getLine: (i) => (i >= 0 && i < lines.length ? lines[i] : ''),
+      getRange: (from, to) => all().slice(offset(from), offset(to)),
+      replaceRange: (replacement, from, to) => {
+        const updated = all().slice(0, offset(from)) + replacement + all().slice(offset(to));
+        lines.length = 0;
+        lines.push(...updated.split('\n'));
+      },
+      setLine: (i, text) => {
+        lines[i] = text;
+      },
+    };
+  }
+
+  function setupPlugin(noteText) {
+    const plugin = createMockedPlugin();
+    const editor = makeEditor(noteText);
+    plugin.app.workspace = {
+      activeEditor: { editor },
+      getActiveFile: () => ({ path: 'note.md' }),
+    };
+    plugin.app.metadataCache = { getFirstLinkpathDest: (linkpath) => ({ path: 'audio/' + linkpath }) };
+    plugin.settings.cleanupAuto = false;
+    plugin.settings.cleanupModel = 'qwen2.5-0.5b';
+    plugin.settings.cleanupPrompt = 'Clean up: {text}';
+    plugin.settings.headingLevel = 2;
+    plugin.settings.regexFilter = '';
+    plugin.transcriber = jest.fn().mockResolvedValue({ text: 'this is a test transcription' });
+    plugin.loadModel = jest.fn().mockResolvedValue(true);
+    plugin.decodeAudioFile = jest.fn().mockResolvedValue(new Float32Array([0, 0.5, 0]));
+    return { plugin, editor };
+  }
+
+  function noticed(spy, message) {
+    return spy.mock.calls.some((args) => typeof args[0] === 'string' && args[0].includes('[Notice] ' + message));
+  }
+
+  function silence() {
+    return jest.spyOn(console, 'log').mockImplementation(() => {});
+  }
+
+  test('cleanTranscript returns the cleaned text', async () => {
+    const { plugin } = setupPlugin('');
+    const spy = silence();
+    const result = await plugin.cleanTranscript('um hello');
+    expect(result).toBe('Cleaned text.');
+    expect(plugin.desktopCleaner.clean).toHaveBeenCalledWith('um hello', 'Clean up: {text}');
+    expect(plugin.desktopCleaner.initialize).toHaveBeenCalledWith('qwen2.5-0.5b', expect.any(Function));
+    spy.mockRestore();
+  });
+
+  test('cleanTranscript falls back to the raw text when cleanup fails', async () => {
+    const { plugin } = setupPlugin('');
+    const spy = silence();
+    plugin.desktopCleaner = {
+      initialize: jest.fn().mockResolvedValue(),
+      clean: jest.fn().mockRejectedValue(new Error('boom')),
+      shutdown: jest.fn(),
+    };
+    const result = await plugin.cleanTranscript('um hello');
+    expect(result).toBe('um hello');
+    expect(spy.mock.calls.some((args) => String(args[0]).includes('[Notice] Cleanup failed: boom'))).toBe(true);
+    spy.mockRestore();
+  });
+
+  test('transcribeFile with cleanup off inserts the raw transcript', async () => {
+    const { plugin, editor } = setupPlugin('![[Recording.m4a]]');
+    const spy = silence();
+    await plugin.transcribeFile('Recording.m4a');
+    expect(editor.getValue()).toBe('![[Recording.m4a]]\n\n## Transcription\n\nthis is a test transcription');
+    expect(plugin.desktopCleaner).toBe(null);
+    spy.mockRestore();
+  });
+
+  test('transcribeFile with cleanup on inserts cleaned text and a collapsed original', async () => {
+    const { plugin, editor } = setupPlugin('![[Recording.m4a]]');
+    plugin.settings.cleanupAuto = true;
+    const spy = silence();
+    await plugin.transcribeFile('Recording.m4a');
+    expect(editor.getValue()).toBe(
+      '![[Recording.m4a]]\n\n## Transcription\n\nCleaned text.\n\n> [!note]- Original transcript\n> this is a test transcription',
+    );
+    spy.mockRestore();
+  });
+
+  test('cleanUpFile replaces an existing transcript with the cleaned version', async () => {
+    const note = '![[Recording.m4a]]\n\n## Transcription\n\num so this is a test transcription';
+    const { plugin, editor } = setupPlugin(note);
+    const spy = silence();
+    await plugin.cleanUpFile('Recording.m4a');
+    expect(editor.getValue()).toBe(
+      '![[Recording.m4a]]\n\n## Transcription\n\nCleaned text.\n\n> [!note]- Original transcript\n> um so this is a test transcription',
+    );
+    expect(plugin.desktopCleaner.clean).toHaveBeenCalledWith('um so this is a test transcription', 'Clean up: {text}');
+    spy.mockRestore();
+  });
+
+  test('cleanUpFile notices when the embed has no transcript', async () => {
+    const { plugin } = setupPlugin('![[Recording.m4a]]\n\nSome other text');
+    const spy = silence();
+    await plugin.cleanUpFile('Recording.m4a');
+    expect(noticed(spy, 'No transcription found for: Recording.m4a')).toBe(true);
+    spy.mockRestore();
+  });
+
+  test('cleanUpFile reuses the original transcript from the callout', async () => {
+    const note =
+      '![[Recording.m4a]]\n\n## Transcription\n\nOld cleaned.\n\n> [!note]- Original transcript\n> um raw words here';
+    const { plugin } = setupPlugin(note);
+    const spy = silence();
+    await plugin.cleanUpFile('Recording.m4a');
+    expect(plugin.desktopCleaner.clean).toHaveBeenCalledWith('um raw words here', 'Clean up: {text}');
+    spy.mockRestore();
+  });
+
+  test('cleanUpFile leaves the note unchanged when cleanup returns the same text', async () => {
+    const note = '![[Recording.m4a]]\n\n## Transcription\n\nidentical';
+    const { plugin, editor } = setupPlugin(note);
+    plugin.desktopCleaner = {
+      initialize: jest.fn().mockResolvedValue(),
+      clean: jest.fn().mockResolvedValue('identical'),
+      shutdown: jest.fn(),
+    };
+    const spy = silence();
+    await plugin.cleanUpFile('Recording.m4a');
+    expect(editor.getValue()).toBe(note);
+    expect(spy.mock.calls.some((args) => String(args[0]).includes('[Notice] Transcript unchanged'))).toBe(true);
+    spy.mockRestore();
+  });
+
+  test('onunload shuts the cleaner down', async () => {
+    const { plugin } = setupPlugin('');
+    plugin.desktopCleaner = { shutdown: jest.fn() };
+    const spy = silence();
+    plugin.onunload();
+    expect(plugin.desktopCleaner.shutdown).toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

@@ -32,6 +32,17 @@ Notes that embed audio files (e.g. `![[Recording.m4a]]`, supporting `mp3, wav, m
 
 The transcript is written under a `Transcription` heading (level configurable in settings, default `##`). Transcribing an already-transcribed embed asks before replacing. The same Whisper model and regex filter settings used for live transcription are applied, and the same engines are used: whisper.cpp on desktop, transformers.js on mobile.
 
+## Cleaning up transcripts
+
+On desktop, transcripts can be passed through a small local language model that removes filler words (um, ah, you know), fixes punctuation and capitalisation, and splits the text into paragraphs with minimal changes to the wording.
+
+- Use the **Clean up** button next to an audio embed, or the command **Clean up transcript in this note**.
+- Optionally enable **Clean up transcripts** in settings to run automatically after each file transcription (off by default; live recordings are never cleaned up automatically).
+- The original transcript is kept in a collapsed `> [!note]- Original transcript` callout below the cleaned text.
+- The cleanup prompt is editable in settings. `{text}` is replaced with the transcript.
+- The model and `llama-server` binary are downloaded into the plugin folder on first use (`models/` and `bin/`), like the Whisper model. Default model: Qwen2.5 0.5B Instruct (379 MB, Q4_K_M); Qwen2.5 1.5B (940 MB) is available in settings for better quality.
+- Only one transcript is cleaned per request, and transcripts larger than the model's context window are left unchanged with a warning.
+
 ## Privacy
 
 This plugin processes all audio data locally on your device. No audio recordings or transcriptions are transmitted to external servers at any point.
