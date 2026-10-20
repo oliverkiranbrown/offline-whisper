@@ -672,6 +672,10 @@ class WhisperTranscriptionPlugin extends Plugin {
   }
 
   async cleanUpFile(linkpath) {
+    if (isMobilePlatform) {
+      new Notice('Cleanup is only available on desktop');
+      return;
+    }
     if (this.isCleaningUp) {
       new Notice('A cleanup is already running');
       return;
@@ -1049,6 +1053,10 @@ class WhisperSettingTab extends PluginSettingTab {
               if (!isMobilePlatform) {
                 if (!this.plugin.desktopTranscriber) {
                   this.plugin.desktopTranscriber = new DesktopTranscriber(this.plugin);
+                }
+                if (this.plugin.desktopCleaner) {
+                  // Stop llama-server so its binary can be deleted (required on Windows).
+                  this.plugin.desktopCleaner.shutdown();
                 }
                 this.plugin.desktopTranscriber.clearCache();
                 new Notice('Cache cleared');

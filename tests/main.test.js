@@ -1211,22 +1211,13 @@ describe('Audio file transcription', () => {
     expect(plugin.extractOriginalTranscript('plain text')).toBe('plain text');
   });
 
-  test('cleanUpFile notices when the embed has no transcript', async () => {
-    const { plugin } = setupFileTranscription('![[Recording.m4a]]\n\nSome other text');
-    const spy = noticeSpy();
-    await plugin.cleanUpFile('Recording.m4a');
-    expect(noticed(spy, 'No transcription found for: Recording.m4a')).toBe(true);
-    spy.mockRestore();
-  });
-
-  test('cleanUpFile reports failure and leaves the note unchanged on mobile', async () => {
+  test('cleanUpFile explains cleanup is desktop only on mobile', async () => {
     const note = '![[Recording.m4a]]\n\n## Transcription\n\num so hello there';
     const { plugin, editor } = setupFileTranscription(note);
-    plugin.transcriber = jest.fn(() => Promise.resolve({ text: 'x' }));
     const spy = noticeSpy();
     await plugin.cleanUpFile('Recording.m4a');
     expect(editor.getValue()).toBe(note);
-    expect(noticed(spy, 'Transcript unchanged')).toBe(true);
+    expect(noticed(spy, 'Cleanup is only available on desktop')).toBe(true);
     spy.mockRestore();
   });
 });

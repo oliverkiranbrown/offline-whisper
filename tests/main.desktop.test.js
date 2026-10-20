@@ -218,6 +218,10 @@ describe('Transcript cleanup (desktop)', () => {
     return { plugin, editor };
   }
 
+  function noticed(spy, message) {
+    return spy.mock.calls.some((args) => typeof args[0] === 'string' && args[0].includes('[Notice] ' + message));
+  }
+
   function silence() {
     return jest.spyOn(console, 'log').mockImplementation(() => {});
   }
@@ -275,6 +279,14 @@ describe('Transcript cleanup (desktop)', () => {
       '![[Recording.m4a]]\n\n## Transcription\n\nCleaned text.\n\n> [!note]- Original transcript\n> um so this is a test transcription',
     );
     expect(plugin.desktopCleaner.clean).toHaveBeenCalledWith('um so this is a test transcription', 'Clean up: {text}');
+    spy.mockRestore();
+  });
+
+  test('cleanUpFile notices when the embed has no transcript', async () => {
+    const { plugin } = setupPlugin('![[Recording.m4a]]\n\nSome other text');
+    const spy = silence();
+    await plugin.cleanUpFile('Recording.m4a');
+    expect(noticed(spy, 'No transcription found for: Recording.m4a')).toBe(true);
     spy.mockRestore();
   });
 
