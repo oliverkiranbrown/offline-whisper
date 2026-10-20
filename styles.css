@@ -1,5 +1,6 @@
-/* Inline Transcribe button on embedded audio files */
-.internal-embed .transcribe-audio-btn {
+/* Inline Transcribe / Clean up buttons on embedded audio files */
+.internal-embed .transcribe-audio-btn,
+.internal-embed .cleanup-audio-btn {
   display: block;
   margin-top: 4px;
   padding: 2px 10px;
